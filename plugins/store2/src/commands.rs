@@ -23,20 +23,34 @@ fn secure_store_account(identifier: &str, scope: &str, key: &str) -> String {
     }
 }
 
-fn legacy_secret_entry<R: tauri::Runtime>(
+fn legacy_secret_locations(identifier: &str, scope: &str, key: &str) -> Vec<(String, String)> {
+    let service = secure_store_service(identifier);
+    let account = format!("{scope}:{key}");
+    let current_account = secure_store_account(identifier, scope, key);
+    let legacy_service = format!("{identifier}.{SECURE_STORE_SUFFIX}");
+    let mut locations = Vec::new();
+
+    if account != current_account {
+        locations.push((service.clone(), account.clone()));
+    }
+    if legacy_service != service {
+        locations.push((legacy_service, account));
+    }
+
+    locations
+}
+
+fn legacy_secret_entries<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     scope: &str,
     key: &str,
-) -> Result<Option<keyring::Entry>, String> {
-    let legacy_service = format!("{}.{}", app.config().identifier, SECURE_STORE_SUFFIX);
-    if legacy_service == secure_store_service(&app.config().identifier) {
-        return Ok(None);
-    }
-
-    let account = format!("{scope}:{key}");
-    keyring::Entry::new(&legacy_service, &account)
-        .map(Some)
-        .map_err(|error| error.to_string())
+) -> Result<Vec<keyring::Entry>, String> {
+    legacy_secret_locations(&app.config().identifier, scope, key)
+        .into_iter()
+        .map(|(service, account)| {
+            keyring::Entry::new(&service, &account).map_err(|error| error.to_string())
+        })
+        .collect()
 }
 
 fn secret_entry<R: tauri::Runtime>(
@@ -169,19 +183,19 @@ pub(crate) async fn get_secret<R: tauri::Runtime>(
         match entry.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => {
-                let Some(legacy_entry) = legacy_secret_entry(&app, &scope, &key)? else {
-                    return Ok(None);
-                };
-                match legacy_entry.get_password() {
-                    Ok(secret) => {
-                        if entry.set_password(&secret).is_ok() {
-                            let _ = legacy_entry.delete_credential();
+                for legacy_entry in legacy_secret_entries(&app, &scope, &key)? {
+                    match legacy_entry.get_password() {
+                        Ok(secret) => {
+                            if entry.set_password(&secret).is_ok() {
+                                let _ = legacy_entry.delete_credential();
+                            }
+                            return Ok(Some(secret));
                         }
-                        Ok(Some(secret))
+                        Err(keyring::Error::NoEntry | keyring::Error::PlatformFailure(_)) => {}
+                        Err(error) => return Err(error.to_string()),
                     }
-                    Err(keyring::Error::NoEntry) => Ok(None),
-                    Err(error) => Err(error.to_string()),
                 }
+                Ok(None)
             }
             Err(error) => Err(error.to_string()),
         }
@@ -203,7 +217,7 @@ pub(crate) async fn set_secret<R: tauri::Runtime>(
         entry
             .set_password(&value)
             .map_err(|error| error.to_string())?;
-        if let Some(legacy_entry) = legacy_secret_entry(&app, &scope, &key)? {
+        for legacy_entry in legacy_secret_entries(&app, &scope, &key)? {
             let _ = legacy_entry.delete_credential();
         }
         Ok(())
@@ -220,9 +234,9 @@ pub(crate) async fn delete_secret<R: tauri::Runtime>(
     key: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if let Some(legacy_entry) = legacy_secret_entry(&app, &scope, &key)? {
+        for legacy_entry in legacy_secret_entries(&app, &scope, &key)? {
             match legacy_entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Ok(()) | Err(keyring::Error::NoEntry | keyring::Error::PlatformFailure(_)) => {}
                 Err(error) => return Err(error.to_string()),
             }
         }
@@ -279,5 +293,27 @@ mod tests {
             secure_store_account("com.hyprnote.stable", "provider", "deepgram"),
             "provider:deepgram"
         );
+    }
+
+    #[test]
+    fn migrates_all_previous_dev_secret_locations() {
+        assert_eq!(
+            legacy_secret_locations("com.hyprnote.dev", "provider", "deepgram"),
+            vec![
+                (
+                    "com.anarlog.dev.secure-store".to_string(),
+                    "provider:deepgram".to_string(),
+                ),
+                (
+                    "com.hyprnote.dev.secure-store".to_string(),
+                    "provider:deepgram".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_duplicate_legacy_secret_locations() {
+        assert!(legacy_secret_locations("com.example.app", "provider", "deepgram").is_empty());
     }
 }
