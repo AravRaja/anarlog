@@ -1,6 +1,7 @@
 use crate::Store2PluginExt;
 
 const SECURE_STORE_SUFFIX: &str = "secure-store";
+const NATIVE_SECRET_ACCOUNT_PREFIXES: &[&str] = &["e2ee:"];
 #[cfg(target_os = "macos")]
 const MACOS_KEYCHAIN_ACCESS_ERROR_PREFIX: &str = "macOS couldn't access your login Keychain.";
 
@@ -26,6 +27,18 @@ fn secure_store_account(identifier: &str, scope: &str, key: &str) -> String {
     } else {
         account
     }
+}
+
+fn validate_renderer_secret_coordinate(scope: &str, key: &str) -> Result<(), String> {
+    let account = format!("{scope}:{key}");
+    if NATIVE_SECRET_ACCOUNT_PREFIXES
+        .iter()
+        .any(|prefix| account.starts_with(prefix))
+    {
+        return Err("secure-store account is reserved for native use".to_string());
+    }
+
+    Ok(())
 }
 
 fn secure_store_error(error: keyring::Error) -> String {
@@ -252,6 +265,7 @@ pub(crate) async fn get_secret<R: tauri::Runtime>(
     scope: String,
     key: String,
 ) -> Result<Option<String>, String> {
+    validate_renderer_secret_coordinate(&scope, &key)?;
     read_secret(app, scope, key).await
 }
 
@@ -294,6 +308,7 @@ pub(crate) async fn set_secret<R: tauri::Runtime>(
     key: String,
     value: String,
 ) -> Result<(), String> {
+    validate_renderer_secret_coordinate(&scope, &key)?;
     write_secret(app, scope, key, value).await
 }
 
@@ -303,6 +318,7 @@ pub async fn write_secret<R: tauri::Runtime>(
     key: String,
     value: String,
 ) -> Result<(), String> {
+    validate_renderer_secret_coordinate(&scope, &key)?;
     tauri::async_runtime::spawn_blocking(move || {
         let entry = secret_entry(&app, &scope, &key)?;
         entry.set_password(&value).map_err(secure_store_error)?;
@@ -404,6 +420,13 @@ mod tests {
     #[test]
     fn skips_duplicate_legacy_secret_locations() {
         assert!(legacy_secret_locations("com.example.app", "provider", "deepgram").is_empty());
+    }
+
+    #[test]
+    fn keeps_renderer_secrets_out_of_native_accounts() {
+        assert!(validate_renderer_secret_coordinate("provider", "deepgram").is_ok());
+        assert!(validate_renderer_secret_coordinate("e2ee", "account:user-a:recovery-v1").is_err());
+        assert!(validate_renderer_secret_coordinate("e2ee:account", "user-a:recovery-v1").is_err());
     }
 
     #[cfg(target_os = "macos")]
