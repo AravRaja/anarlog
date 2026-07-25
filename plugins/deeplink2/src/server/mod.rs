@@ -127,6 +127,11 @@ fn ui_content(deep_link: &DeepLink) -> (bool, &'static str, &'static str) {
             "Demo complete",
             "Anarlog is finishing your transcript and creating your summary.",
         ),
+        DeepLink::Record(_) => (
+            true,
+            "Recording updated",
+            "You can close this window and return to the app.",
+        ),
     }
 }
 
