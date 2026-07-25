@@ -13,6 +13,7 @@ import { dismissInstruction } from "@hypr/plugin-windows";
 import { useAuth } from "~/auth";
 import { createAuthCallbackHandler } from "~/auth/deeplink";
 import { stopActiveWelcomeDemo } from "~/onboarding/welcome-note";
+import { createSession } from "~/session/queries";
 import {
   allowReconnectedCalendarConnections,
   CALENDAR_SYNC_TASK_ID,
@@ -26,6 +27,7 @@ import {
 import { subscribeThenDrainDeepLinks } from "~/shared/deeplink";
 import { useLatestRef } from "~/shared/hooks/useLatestRef";
 import { useMountEffect } from "~/shared/hooks/useMountEffect";
+import { listenerStore } from "~/store/zustand/listener/instance";
 import { useTabs } from "~/store/zustand/tabs";
 
 export function useDeeplinkHandler() {
@@ -79,6 +81,27 @@ export function useDeeplinkHandler() {
         void stopActiveWelcomeDemo().catch((error) => {
           console.error("[onboarding] failed to complete welcome demo", error);
         });
+      } else if (payload.to === "/record") {
+        if (payload.search.action === "stop") {
+          listenerStore.getState().stop();
+        } else {
+          const live = listenerStore.getState().live;
+          if (live.status === "active" && live.sessionId) {
+            openNewRef.current({ type: "sessions", id: live.sessionId });
+          } else {
+            void createSession()
+              .then((sessionId) => {
+                openNewRef.current({
+                  type: "sessions",
+                  id: sessionId,
+                  state: { view: null, autoStart: true },
+                });
+              })
+              .catch((error) => {
+                console.error("[deeplink] failed to start recording", error);
+              });
+          }
+        }
       } else if (payload.to === "/integration/callback") {
         const {
           disconnected_connection_id,
